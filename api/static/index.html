@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Multi-Claude Agents</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #252836;
+    --border: #2e3148; --text: #e2e8f0; --muted: #8892a4;
+    --green: #4ade80; --red: #f87171; --yellow: #fbbf24;
+    --blue: #60a5fa; --purple: #a78bfa; --orange: #fb923c;
+    --accent: #6366f1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+
+  /* ── Header ── */
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  header h1 { font-size: 1rem; font-weight: 600; letter-spacing: -0.02em; }
+  header h1 span { color: var(--accent); }
+  .header-actions { margin-left: auto; display: flex; gap: 8px; }
+
+  /* ── Tabs ── */
+  nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; gap: 2px; flex-shrink: 0; }
+  nav button { background: none; border: none; color: var(--muted); padding: 10px 16px; font-size: 0.85rem; cursor: pointer; border-bottom: 2px solid transparent; transition: all .15s; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  nav button:hover { color: var(--text); }
+
+  /* ── Panels ── */
+  .panel { display: none; flex: 1; overflow: hidden; }
+  .panel.active { display: flex; }
+
+  /* ── Builds panel ── */
+  #panel-builds { gap: 0; }
+  .sidebar { width: 280px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar-header { padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; display: flex; align-items: center; justify-content: space-between; }
+  .build-list { flex: 1; overflow-y: auto; }
+  .build-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .1s; }
+  .build-item:hover { background: var(--surface2); }
+  .build-item.selected { background: var(--surface2); border-left: 3px solid var(--accent); }
+  .build-item .name { font-size: 0.85rem; font-weight: 500; }
+  .build-item .meta { font-size: 0.75rem; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dot.running { background: var(--yellow); animation: pulse 1.2s infinite; }
+  .dot.completed { background: var(--green); }
+  .dot.failed { background: var(--red); }
+  .dot.cancelled { background: var(--muted); }
+  .dot.orphaned { background: var(--orange); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  .main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .build-toolbar { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--surface); flex-shrink: 0; }
+  .build-toolbar .build-title { font-size: 0.9rem; font-weight: 600; }
+  .build-toolbar .build-status { font-size: 0.75rem; color: var(--muted); }
+  .log-area { flex: 1; overflow-y: auto; padding: 12px 16px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 0.78rem; line-height: 1.6; }
+  .log-area .line { white-space: pre-wrap; word-break: break-all; }
+  .log-area .line.agent { color: var(--blue); }
+  .log-area .line.squad { color: var(--purple); }
+  .log-area .line.warn { color: var(--yellow); }
+  .log-area .line.error { color: var(--red); }
+  .log-area .line.ok { color: var(--green); }
+  .log-area .placeholder { color: var(--muted); padding: 40px; text-align: center; }
+  .report-area { border-top: 1px solid var(--border); background: var(--surface); max-height: 240px; overflow-y: auto; }
+  .report-area pre { padding: 12px 16px; font-size: 0.75rem; font-family: 'Consolas', monospace; color: var(--green); }
+
+  /* ── New Build form ── */
+  #panel-new { flex-direction: column; align-items: center; justify-content: center; gap: 0; padding: 32px 16px; overflow-y: auto; }
+  .form-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 28px; width: 100%; max-width: 640px; }
+  .form-card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 20px; }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 6px; }
+  .field input, .field textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 0.85rem; font-family: inherit; outline: none; transition: border .15s; }
+  .field input:focus, .field textarea:focus { border-color: var(--accent); }
+  .field textarea { min-height: 120px; resize: vertical; }
+  .field .hint { font-size: 0.72rem; color: var(--muted); margin-top: 4px; }
+
+  /* ── Skills panel ── */
+  #panel-skills { flex-direction: column; overflow: hidden; }
+  .skills-toolbar { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface); display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+  .skills-toolbar input { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 12px; font-size: 0.83rem; width: 220px; outline: none; }
+  .skills-toolbar input:focus { border-color: var(--accent); }
+  .cat-btns { display: flex; flex-wrap: wrap; gap: 4px; }
+  .cat-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--muted); border-radius: 4px; padding: 3px 9px; font-size: 0.73rem; cursor: pointer; }
+  .cat-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+  .skills-grid { flex: 1; overflow-y: auto; padding: 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; align-content: start; }
+  .skill-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .skill-card .skill-name { font-size: 0.8rem; font-weight: 600; font-family: monospace; color: var(--blue); margin-bottom: 4px; }
+  .skill-card .skill-desc { font-size: 0.75rem; color: var(--muted); line-height: 1.5; }
+  .skill-card .skill-cat { display: inline-block; margin-top: 6px; font-size: 0.67rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px; color: var(--muted); }
+
+  /* ── Workspaces panel ── */
+  #panel-workspaces { flex-direction: column; overflow: hidden; }
+  .ws-toolbar { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+  .ws-list { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .ws-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; display: flex; align-items: center; gap: 12px; }
+  .ws-card .ws-name { font-size: 0.85rem; font-weight: 600; font-family: monospace; }
+  .ws-card .ws-meta { font-size: 0.75rem; color: var(--muted); }
+  .ws-card .ws-del { margin-left: auto; }
+
+  /* ── Buttons ── */
+  .btn { border: none; border-radius: 6px; padding: 7px 14px; font-size: 0.82rem; cursor: pointer; font-weight: 500; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-danger { background: var(--red); color: white; }
+  .btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ── Toast ── */
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font-size: 0.82rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 99; }
+  #toast.show { opacity: 1; }
+  #toast.error { border-color: var(--red); color: var(--red); }
+  #toast.ok { border-color: var(--green); color: var(--green); }
+
+  /* ── Empty state ── */
+  .empty { color: var(--muted); text-align: center; padding: 40px; font-size: 0.85rem; }
+
+  ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+  <h1>Multi-<span>Claude</span> Agents</h1>
+  <div class="header-actions">
+    <button class="btn btn-ghost" onclick="refreshAll()" title="Refresh">↺ Refresh</button>
+    <button class="btn btn-primary" onclick="showTab('new')">+ New Build</button>
+  </div>
+</header>
+
+<nav>
+  <button id="tab-builds" class="active" onclick="showTab('builds')">🏗️ Builds</button>
+  <button id="tab-new" onclick="showTab('new')">+ New</button>
+  <button id="tab-skills" onclick="showTab('skills')">⚡ Skills</button>
+  <button id="tab-workspaces" onclick="showTab('workspaces')">📁 Workspaces</button>
+</nav>
+
+<!-- ── Builds Panel ── -->
+<div id="panel-builds" class="panel active">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span>Builds</span>
+      <span id="build-count" style="color:var(--text)">0</span>
+    </div>
+    <div class="build-list" id="build-list"></div>
+  </aside>
+  <div class="main-area">
+    <div class="build-toolbar" id="build-toolbar" style="display:none">
+      <div>
+        <div class="build-title" id="toolbar-title"></div>
+        <div class="build-status" id="toolbar-status"></div>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-ghost" id="btn-scroll" onclick="toggleAutoScroll()">⤓ Auto-scroll ON</button>
+        <button class="btn btn-danger" id="btn-cancel" onclick="cancelBuild()" style="display:none">⏹ Cancel</button>
+      </div>
+    </div>
+    <div class="log-area" id="log-area">
+      <div class="placeholder">Select a build to view its output, or start a new one.</div>
+    </div>
+    <div class="report-area" id="report-area" style="display:none">
+      <pre id="report-pre"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- ── New Build Panel ── -->
+<div id="panel-new" class="panel">
+  <div class="form-card">
+    <h2>🚀 Start a New Build</h2>
+    <div class="field">
+      <label>Project name</label>
+      <input id="f-name" placeholder="e.g. task-manager-api" />
+    </div>
+    <div class="field">
+      <label>Description</label>
+      <textarea id="f-desc" placeholder="Describe what you want to build in plain English..."></textarea>
+    </div>
+    <div class="field">
+      <label>Tech stack</label>
+      <input id="f-stack" placeholder="Python, FastAPI, SQLite, pytest" />
+      <div class="hint">Comma-separated list of languages and frameworks.</div>
+    </div>
+    <button class="btn btn-primary" id="btn-start" onclick="startBuild()" style="width:100%;padding:10px">
+      Launch Squad
+    </button>
+  </div>
+</div>
+
+<!-- ── Skills Panel ── -->
+<div id="panel-skills" class="panel">
+  <div class="skills-toolbar">
+    <input id="skill-search" placeholder="Search skills…" oninput="filterSkills()" />
+    <div class="cat-btns" id="cat-btns"></div>
+  </div>
+  <div class="skills-grid" id="skills-grid">
+    <div class="empty">Loading skills…</div>
+  </div>
+</div>
+
+<!-- ── Workspaces Panel ── -->
+<div id="panel-workspaces" class="panel">
+  <div class="ws-toolbar">
+    <span style="font-size:.8rem;color:var(--muted)">Generated project workspaces</span>
+    <button class="btn btn-ghost" style="margin-left:auto;font-size:.78rem" onclick="loadWorkspaces()">↺ Refresh</button>
+  </div>
+  <div class="ws-list" id="ws-list">
+    <div class="empty">Loading workspaces…</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let selectedBuildId = null;
+let activeSSE = null;
+let autoScroll = true;
+let allSkills = [];
+let activeCategory = null;
+
+// ── Tabs ───────────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'builds') loadBuilds();
+  if (name === 'skills') loadSkills();
+  if (name === 'workspaces') loadWorkspaces();
+}
+
+// ── Builds ─────────────────────────────────────────────────────────────────
+async function loadBuilds() {
+  const res = await fetch('/builds').catch(() => null);
+  if (!res || !res.ok) return;
+  const builds = await res.json();
+  document.getElementById('build-count').textContent = builds.length;
+  const list = document.getElementById('build-list');
+  list.innerHTML = '';
+  if (builds.length === 0) {
+    list.innerHTML = '<div class="empty">No builds yet.</div>';
+    return;
+  }
+  builds.forEach(b => {
+    const el = document.createElement('div');
+    el.className = 'build-item' + (b.id === selectedBuildId ? ' selected' : '');
+    el.dataset.id = b.id;
+    el.innerHTML = `
+      <div class="name">${esc(b.spec_name)}</div>
+      <div class="meta"><span class="dot ${b.status}"></span>${b.status} · ${b.events_count} lines</div>
+    `;
+    el.onclick = () => selectBuild(b.id, b.spec_name, b.status);
+    list.appendChild(el);
+  });
+}
+
+function selectBuild(id, name, status) {
+  selectedBuildId = id;
+  document.querySelectorAll('.build-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === id);
+  });
+  const toolbar = document.getElementById('build-toolbar');
+  toolbar.style.display = 'flex';
+  document.getElementById('toolbar-title').textContent = name;
+  document.getElementById('toolbar-status').textContent = 'status: ' + status;
+  document.getElementById('btn-cancel').style.display = status === 'running' ? '' : 'none';
+
+  // Stop previous SSE
+  if (activeSSE) { activeSSE.close(); activeSSE = null; }
+
+  const logArea = document.getElementById('log-area');
+  logArea.innerHTML = '';
+  document.getElementById('report-area').style.display = 'none';
+
+  // Stream output
+  const sse = new EventSource(`/build/${id}/stream`);
+  activeSSE = sse;
+
+  sse.onmessage = e => {
+    appendLine(e.data);
+  };
+  sse.addEventListener('done', e => {
+    sse.close();
+    activeSSE = null;
+    document.getElementById('btn-cancel').style.display = 'none';
+    document.getElementById('toolbar-status').textContent = 'status: ' + e.data;
+    updateBuildDot(id, e.data);
+    if (e.data === 'completed') loadReport(id);
+  });
+  sse.onerror = () => {
+    if (status !== 'running') { sse.close(); return; }
+  };
+}
+
+function appendLine(text) {
+  const logArea = document.getElementById('log-area');
+  const div = document.createElement('div');
+  div.className = 'line';
+  // Colour coding
+  if (text.startsWith('[Squad]'))        div.classList.add('squad');
+  else if (text.startsWith('['))         div.classList.add('agent');
+  if (text.includes('APPROVED') || text.includes('CONSTITUTIONAL') || text.includes('PASS'))
+    div.classList.add('ok');
+  if (text.includes('REJECTED') || text.includes('VIOLATIONS') || text.includes('FAIL') || text.includes('FATAL'))
+    div.classList.add('error');
+  if (text.includes('WARNING') || text.includes('rate limit'))
+    div.classList.add('warn');
+  div.textContent = text;
+  logArea.appendChild(div);
+  if (autoScroll) logArea.scrollTop = logArea.scrollHeight;
+}
+
+async function loadReport(id) {
+  const res = await fetch(`/build/${id}`).catch(() => null);
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  if (data.result && Object.keys(data.result).length) {
+    const area = document.getElementById('report-area');
+    area.style.display = '';
+    document.getElementById('report-pre').textContent = JSON.stringify(data.result, null, 2);
+  }
+}
+
+function updateBuildDot(id, status) {
+  const item = document.querySelector(`.build-item[data-id="${id}"] .dot`);
+  if (item) {
+    item.className = 'dot ' + status;
+    item.closest('.build-item').querySelector('.meta').childNodes[1].textContent = ' ' + status;
+  }
+}
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  document.getElementById('btn-scroll').textContent = '⤓ Auto-scroll ' + (autoScroll ? 'ON' : 'OFF');
+}
+
+async function cancelBuild() {
+  if (!selectedBuildId) return;
+  if (!confirm('Cancel this build?')) return;
+  const res = await fetch(`/build/${selectedBuildId}`, { method: 'DELETE' });
+  if (res.ok) {
+    toast('Build cancellation requested', 'ok');
+    document.getElementById('btn-cancel').style.display = 'none';
+  } else {
+    const err = await res.json().catch(() => ({}));
+    toast(err.detail || 'Cancel failed', 'error');
+  }
+}
+
+// ── New Build ──────────────────────────────────────────────────────────────
+async function startBuild() {
+  const name = document.getElementById('f-name').value.trim();
+  const desc = document.getElementById('f-desc').value.trim();
+  const stack = document.getElementById('f-stack').value.trim();
+  if (!name || !desc || !stack) { toast('Fill in all fields', 'error'); return; }
+  const techStack = stack.split(',').map(s => s.trim()).filter(Boolean);
+  const btn = document.getElementById('btn-start');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const res = await fetch('/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: desc, tech_stack: techStack }),
+    });
+    if (res.status === 409) { toast('A build is already running — wait for it to finish', 'error'); return; }
+    if (!res.ok) { const e = await res.json(); toast(e.detail || 'Error', 'error'); return; }
+    const data = await res.json();
+    toast('Build started!', 'ok');
+    showTab('builds');
+    await loadBuilds();
+    selectBuild(data.id, name, 'running');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Launch Squad';
+  }
+}
+
+// ── Skills ─────────────────────────────────────────────────────────────────
+async function loadSkills() {
+  if (allSkills.length) { renderSkills(); return; }
+  const res = await fetch('/skills').catch(() => null);
+  if (!res || !res.ok) { document.getElementById('skills-grid').innerHTML = '<div class="empty">Failed to load skills.</div>'; return; }
+  allSkills = await res.json();
+  // Build category buttons
+  const cats = [...new Set(allSkills.map(s => s.category))].sort();
+  const btns = document.getElementById('cat-btns');
+  btns.innerHTML = cats.map(c => `<button class="cat-btn" onclick="filterByCategory('${c}')">${c}</button>`).join('');
+  renderSkills();
+}
+
+function filterByCategory(cat) {
+  activeCategory = activeCategory === cat ? null : cat;
+  document.querySelectorAll('.cat-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent === activeCategory);
+  });
+  renderSkills();
+}
+
+function filterSkills() { renderSkills(); }
+
+function renderSkills() {
+  const q = document.getElementById('skill-search').value.toLowerCase();
+  let skills = allSkills;
+  if (activeCategory) skills = skills.filter(s => s.category === activeCategory);
+  if (q) skills = skills.filter(s => s.name.includes(q) || s.description.toLowerCase().includes(q));
+  const grid = document.getElementById('skills-grid');
+  if (skills.length === 0) { grid.innerHTML = '<div class="empty">No skills match.</div>'; return; }
+  grid.innerHTML = skills.map(s => `
+    <div class="skill-card">
+      <div class="skill-name">${esc(s.name)}</div>
+      <div class="skill-desc">${esc(s.description)}</div>
+      <span class="skill-cat">${esc(s.category)}</span>
+    </div>
+  `).join('');
+}
+
+// ── Workspaces ─────────────────────────────────────────────────────────────
+async function loadWorkspaces() {
+  const res = await fetch('/workspaces').catch(() => null);
+  if (!res || !res.ok) return;
+  const workspaces = await res.json();
+  const list = document.getElementById('ws-list');
+  if (workspaces.length === 0) { list.innerHTML = '<div class="empty">No workspaces yet — run a build first.</div>'; return; }
+  list.innerHTML = workspaces.map(ws => `
+    <div class="ws-card">
+      <div>
+        <div class="ws-name">${esc(ws.name)}</div>
+        <div class="ws-meta">${ws.file_count} files · ${esc(ws.path)}</div>
+      </div>
+      <button class="btn btn-danger ws-del" onclick="deleteWorkspace('${esc(ws.name)}')">Delete</button>
+    </div>
+  `).join('');
+}
+
+async function deleteWorkspace(name) {
+  if (!confirm(`Delete workspace '${name}'? This cannot be undone.`)) return;
+  const res = await fetch(`/workspace/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (res.ok) { toast(`Workspace '${name}' deleted`, 'ok'); loadWorkspaces(); }
+  else { const e = await res.json().catch(() => ({})); toast(e.detail || 'Delete failed', 'error'); }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+let toastTimer;
+function toast(msg, type = '') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (type ? ' ' + type : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.className = '', 3000);
+}
+
+async function refreshAll() {
+  await loadBuilds();
+  toast('Refreshed', 'ok');
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+loadBuilds();
+
+// Auto-refresh build list every 5 s while on builds tab
+setInterval(() => {
+  if (document.getElementById('panel-builds').classList.contains('active')) {
+    loadBuilds();
+  }
+}, 5000);
+</script>
+</body>
+</html>

@@ -1,3 +1,5 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from agents.developer import Developer
 from agents.sdet import SDET
@@ -39,6 +41,17 @@ class Team:
         self.sdets: list[SDET] = [m for m in members if isinstance(m, SDET)]
         self.team_leads: list[TeamLead] = [m for m in members if isinstance(m, TeamLead)]
         self.safety_reviewers: list[SafetyReviewer] = [m for m in members if isinstance(m, SafetyReviewer)]
+
+        # Cancellation (#8) and coordinator thread-safety (#4)
+        self._cancel_requested: bool = False
+        self._coordinator_lock = threading.Lock()
+
+    def cancel(self) -> None:
+        """
+        Signal the running build to stop after the current task completes.
+        Safe to call from any thread (e.g. the FastAPI cancel endpoint).
+        """
+        self._cancel_requested = True
 
     @classmethod
     def default(cls) -> "Team":
@@ -319,101 +332,133 @@ class Team:
         completed_this_round: list = []
         skills_invoked: list[dict] = []  # track skill usage across the full build
 
+        # ── Per-task worker (#4 parallel, #8 cancellation) ────────────────────
+        def _process_task(dev, task):
+            """
+            Implements a single task end-to-end: coordinator routing → dev
+            implementation → coordinator review → retry loop.
+            Returns (task, local_skills, log_entries) so the main thread can
+            update shared state (backlog, decision log) without lock contention.
+            Coordinator LLM calls are serialized via _coordinator_lock so that
+            concurrent tasks don't corrupt the coordinator's message history.
+            """
+            active_dev = dev
+            local_skills: list[dict] = []
+            log_entries: list[tuple] = []  # (type, title, rationale, outcome)
+
+            if coordinator:
+                with self._coordinator_lock:
+                    approach = coordinator.suggest_approach(task)
+                mode = approach["mode"]
+
+                if mode == "skill":
+                    skill_name = approach["skill_name"]
+                    print(f"[{coordinator.name} | Coordinator] Skill assist '{skill_name}' for: {task.title}")
+                    try:
+                        skill_output = coordinator.invoke_skill(
+                            skill_name,
+                            f"Task: {task.title}\nDescription: {task.description}",
+                        )
+                        local_skills.append({
+                            "task": task.title,
+                            "skill": skill_name,
+                            "triggered_by": coordinator.name,
+                        })
+                        task.description = (
+                            f"--- Skill: {skill_name} ---\n{skill_output}\n\n"
+                            f"--- Original Task ---\n{task.description}"
+                        )
+                    except Exception as e:
+                        print(f"[{coordinator.name} | Coordinator] Skill '{skill_name}' failed: {e}")
+
+                elif mode == "specialist":
+                    role_desc = approach["specialist_role"]
+                    print(f"[{coordinator.name} | Coordinator] Spawning specialist: {role_desc[:60]}")
+                    with self._coordinator_lock:
+                        active_dev = coordinator.spawn_specialist(role_desc)
+                    active_dev.workspace = workspace
+                    active_dev.memory_context = memory_ctx
+
+            approved = False
+            for attempt in range(1, MAX_REJECTIONS + 2):
+                print(f"[{active_dev.name}] Implementing: {task.title} (attempt {attempt})")
+                active_dev.implement_task(task, workspace)
+
+                if not coordinator:
+                    approved = True
+                    break
+
+                print(f"[{coordinator.name} | Coordinator] Reviewing: {task.title}")
+                with self._coordinator_lock:
+                    review = coordinator.review_task(task, workspace)
+
+                if review.get("skill_audit"):
+                    local_skills.append({
+                        "task": task.title,
+                        "skill": "security_audit",
+                        "triggered_by": coordinator.name,
+                    })
+
+                if review["approved"]:
+                    approved = True
+                    print(f"[{coordinator.name} | Coordinator] Approved: {task.title}")
+                    log_entries.append(("success", task.title, f"Approved on attempt {attempt}", review["feedback"][:200]))
+                    break
+
+                print(f"[{coordinator.name} | Coordinator] Rejected (attempt {attempt}): {review['feedback'][:100]}...")
+                log_entries.append(("rejection", task.title, review["feedback"][:300], f"Attempt {attempt} of {MAX_REJECTIONS + 1}"))
+
+                if attempt <= MAX_REJECTIONS:
+                    updated_desc = (
+                        task.description
+                        + f"\n\n--- Coordinator Feedback (attempt {attempt}) ---\n"
+                        + review["feedback"]
+                    )
+                    backlog.update_task(task.id, description=updated_desc)
+
+            if not approved:
+                print(f"[Coordinator] Max attempts reached for '{task.title}' — moving on")
+
+            return task, local_skills, log_entries
+        # ── End _process_task ─────────────────────────────────────────────────
+
         while backlog.get_pending() and sprint < MAX_BUILD_SPRINTS:
+            if self._cancel_requested:
+                print("[Squad] Build cancelled by request — stopping after current sprint")
+                break
+
             sprint += 1
             print(f"[Squad] ── Sprint {sprint} ─────────────────────────────")
             completed_this_round = []
 
+            # Assign tasks to all available developers upfront (sequential, main thread)
+            dev_task_pairs: list[tuple] = []
             for dev in self.developers:
+                if self._cancel_requested:
+                    break
                 task = lead.assign_next_task(backlog, dev.name)
                 if task is None:
                     break
+                dev_task_pairs.append((dev, task))
 
-                # Coordinator suggests approach: generalist / skill / specialist
-                active_dev = dev
-                if coordinator:
-                    approach = coordinator.suggest_approach(task)
-                    mode = approach["mode"]
+            if not dev_task_pairs:
+                break
 
-                    if mode == "skill":
-                        skill_name = approach["skill_name"]
-                        print(f"[{coordinator.name} | Coordinator] Skill assist '{skill_name}' for: {task.title}")
-                        try:
-                            skill_output = coordinator.invoke_skill(
-                                skill_name,
-                                f"Task: {task.title}\nDescription: {task.description}",
-                            )
-                            skills_invoked.append({
-                                "task": task.title,
-                                "skill": skill_name,
-                                "triggered_by": coordinator.name,
-                            })
-                            # Prepend skill output to task description so the developer benefits from it
-                            task.description = (
-                                f"--- Skill: {skill_name} ---\n{skill_output}\n\n"
-                                f"--- Original Task ---\n{task.description}"
-                            )
-                        except Exception as e:
-                            print(f"[{coordinator.name} | Coordinator] Skill '{skill_name}' failed: {e}")
-
-                    elif mode == "specialist":
-                        role_desc = approach["specialist_role"]
-                        print(f"[{coordinator.name} | Coordinator] Spawning specialist: {role_desc[:60]}")
-                        active_dev = coordinator.spawn_specialist(role_desc)
-                        active_dev.workspace = workspace
-                        active_dev.memory_context = memory_ctx
-
-                # Implement → Coordinator review → retry loop
-                approved = False
-                for attempt in range(1, MAX_REJECTIONS + 2):
-                    print(f"[{active_dev.name}] Implementing: {task.title} (attempt {attempt})")
-                    active_dev.implement_task(task, workspace)
-
-                    if not coordinator:
-                        approved = True
-                        break
-
-                    print(f"[{coordinator.name} | Coordinator] Reviewing: {task.title}")
-                    review = coordinator.review_task(task, workspace)
-
-                    if review.get("skill_audit"):
-                        skills_invoked.append({
-                            "task": task.title,
-                            "skill": "security_audit",
-                            "triggered_by": coordinator.name,
-                        })
-
-                    if review["approved"]:
-                        approved = True
-                        print(f"[{coordinator.name} | Coordinator] Approved: {task.title}")
-                        decision_log.record(
-                            spec.name, "success", task.title,
-                            f"Approved on attempt {attempt}",
-                            review["feedback"][:200],
-                        )
-                        break
-
-                    print(f"[{coordinator.name} | Coordinator] Rejected (attempt {attempt}): {review['feedback'][:100]}...")
-                    decision_log.record(
-                        spec.name, "rejection", task.title,
-                        review["feedback"][:300],
-                        f"Attempt {attempt} of {MAX_REJECTIONS + 1}",
-                    )
-
-                    if attempt <= MAX_REJECTIONS:
-                        # Append feedback to description so the next attempt can act on it
-                        updated_desc = (
-                            task.description
-                            + f"\n\n--- Coordinator Feedback (attempt {attempt}) ---\n"
-                            + review["feedback"]
-                        )
-                        backlog.update_task(task.id, description=updated_desc)
-
-                backlog.complete_task(task.id)
-                completed_this_round.append(task)
-
-                if not approved:
-                    print(f"[Coordinator] Max attempts reached for '{task.title}' — moving on")
+            # Implement tasks in parallel (#4) — each dev works concurrently
+            max_workers = max(1, len(dev_task_pairs))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(_process_task, dev, task): (dev, task)
+                    for dev, task in dev_task_pairs
+                }
+                for future in as_completed(futures):
+                    task, local_skills, log_entries = future.result()
+                    # Update shared state from the main thread (no lock needed)
+                    backlog.complete_task(task.id)
+                    completed_this_round.append(task)
+                    skills_invoked.extend(local_skills)
+                    for entry_type, title, rationale, outcome in log_entries:
+                        decision_log.record(spec.name, entry_type, title, rationale, outcome)
 
             for sdet in self.sdets:
                 for task in completed_this_round:

@@ -2,6 +2,7 @@ import os
 import warnings
 import httpx
 import anthropic
+from abc import ABC, abstractmethod
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -9,6 +10,8 @@ load_dotenv()
 
 MODEL = "claude-sonnet-4-6"
 MAX_ITERATIONS = 15
+MAX_RETRIES = 3          # retry attempts on 429 / 529
+RETRY_BASE_DELAY = 2.0   # seconds; doubles each attempt (2 → 4 → 8)
 
 
 def _make_client() -> anthropic.Anthropic:
@@ -110,23 +113,57 @@ def _last_text(messages: list) -> str:
     return ""
 
 
-class BaseAgent:
+class BaseAgent(ABC):
     """
     Foundation for all agents.
     - think(): single-turn reasoning (no tools)
     - act(): multi-turn plan-act-observe loop with tools
     """
 
-    def __init__(self, name: str, roles: list[str], workspace: Path | None = None):
+    def __init__(
+        self,
+        name: str,
+        roles: list[str],
+        workspace: Path | None = None,
+        model: str | None = None,
+    ):
         self.name = name
         self.roles = roles
         self.workspace = workspace
+        self.model = model or MODEL          # per-agent model override (#7)
         self.messages: list = []
         self.memory_context: str = ""  # injected by Team.build_project() from DecisionLog
         self._system_prompt_text = self._create_system_prompt()
 
+    @abstractmethod
     def _create_system_prompt(self) -> str:
-        raise NotImplementedError("Subclasses must implement _create_system_prompt")
+        """Return the system prompt text for this agent. Must be implemented by subclasses."""
+
+    # ── Retry helper (#2) ─────────────────────────────────────────────────────
+
+    def _retry_call(self, fn):
+        """
+        Call fn() and retry up to MAX_RETRIES times on rate-limit (429) or
+        API overload (529) responses, using exponential backoff.
+        Any other APIStatusError is re-raised immediately.
+        """
+        import time
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                return fn()
+            except anthropic.APIStatusError as e:
+                if e.status_code in (429, 529) and attempt < MAX_RETRIES:
+                    delay = RETRY_BASE_DELAY * (2 ** attempt)
+                    print(
+                        f"[{self.name}] HTTP {e.status_code} "
+                        f"(attempt {attempt + 1}/{MAX_RETRIES + 1}) — "
+                        f"retrying in {delay:.0f}s"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
+        # Unreachable — satisfies type checkers
+        raise RuntimeError(f"{self.name}: retry loop exhausted")
 
     def _build_system(self) -> list[dict]:
         blocks: list[dict] = [
@@ -144,19 +181,15 @@ class BaseAgent:
     def think(self, user_message: str) -> str:
         """Single-turn reasoning — no tools. Appends to conversation history."""
         self.messages.append({"role": "user", "content": user_message})
-        try:
-            response = _client.messages.create(
-                model=MODEL,
-                max_tokens=2048,
-                system=self._build_system(),
-                messages=self.messages,
-            )
-        except anthropic.APIStatusError as e:
-            if e.status_code == 429:
-                raise RuntimeError(f"{self.name}: rate limited — retry shortly") from e
-            if e.status_code == 529:
-                raise RuntimeError(f"{self.name}: AI service temporarily unavailable") from e
-            raise
+        system = self._build_system()
+        messages = self.messages
+
+        response = self._retry_call(lambda: _client.messages.create(
+            model=self.model,
+            max_tokens=2048,
+            system=system,
+            messages=messages,
+        ))
 
         text = "".join(b.text for b in response.content if b.type == "text")
         self.messages.append({"role": "assistant", "content": text})
@@ -173,21 +206,17 @@ class BaseAgent:
         self.messages.append({"role": "user", "content": task})
 
         for _ in range(MAX_ITERATIONS):
-            try:
-                response = _client.messages.create(
-                    model=MODEL,
-                    max_tokens=4096,
-                    system=self._build_system(),
-                    messages=self.messages,
-                    tools=tools,
-                    tool_choice={"type": "auto"},
-                )
-            except anthropic.APIStatusError as e:
-                if e.status_code == 429:
-                    raise RuntimeError(f"{self.name}: rate limited — retry shortly") from e
-                if e.status_code == 529:
-                    raise RuntimeError(f"{self.name}: AI service temporarily unavailable") from e
-                raise
+            system = self._build_system()
+            messages = self.messages
+            model = self.model
+            response = self._retry_call(lambda: _client.messages.create(
+                model=model,
+                max_tokens=4096,
+                system=system,
+                messages=messages,
+                tools=tools,
+                tool_choice={"type": "auto"},
+            ))
 
             # Append the full content block list as the assistant turn.
             # The SDK accepts its own typed objects directly here.
@@ -221,6 +250,21 @@ class BaseAgent:
         """
         from skills.registry import SkillRegistry
         return SkillRegistry.invoke(skill_name, task, workspace=self.workspace)
+
+    def invoke_skill_chain(self, skill_names: list[str], task: str) -> dict[str, str]:
+        """
+        Run a pipeline of skills where each skill's output enriches the context
+        fed into the next skill (#9 — skill composition chains).
+
+        Returns an ordered dict of {skill_name: output} for every step so the
+        caller can inspect intermediate results or just use the final value.
+
+        Example:
+            results = self.invoke_skill_chain(["decompose", "system_design", "adr"], task)
+            final = results["adr"]
+        """
+        from skills.registry import SkillRegistry
+        return SkillRegistry.chain(skill_names, task, workspace=self.workspace)
 
     def receive_message(self, sender_name: str, content: str) -> str:
         return self.think(f"[Message from {sender_name}]: {content}")

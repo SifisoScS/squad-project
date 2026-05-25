@@ -135,3 +135,43 @@ class SkillRegistry:
                 lines.append(f"\n### {current_cat.capitalize()}\n")
             lines.append(f"- `{skill.name}` — {skill.description}")
         return "\n".join(lines)
+
+    @classmethod
+    def chain(
+        cls,
+        skill_names: list[str],
+        task: str,
+        workspace: Path | None = None,
+    ) -> dict[str, str]:
+        """
+        Skill composition pipeline (#9).
+
+        Runs each skill in sequence. The output of skill N is appended as
+        additional context when invoking skill N+1, so later skills benefit
+        from prior reasoning without sharing conversation state.
+
+        Returns an ordered dict of {skill_name: output} for every step.
+
+        Example:
+            results = SkillRegistry.chain(
+                ["decompose", "system_design", "adr"],
+                "Design a real-time notification service",
+            )
+            adr_text = results["adr"]
+        """
+        if not skill_names:
+            raise ValueError("chain() requires at least one skill name")
+
+        results: dict[str, str] = {}
+        context = task
+
+        for name in skill_names:
+            output = cls.invoke(name, context, workspace=workspace)
+            results[name] = output
+            # Pipe this skill's output into the next skill's context
+            context = (
+                f"Original task: {task}\n\n"
+                f"--- Output from '{name}' skill ---\n{output}"
+            )
+
+        return results
