@@ -16,17 +16,21 @@ class Skill:
     """
     A named, reusable Claude capability.
 
-    name        — unique identifier used to look up and invoke the skill
-    description — one-liner surfaced in skill listings and tool-choice prompts
-    category    — discovery | engineering | quality | documentation
+    name          — unique identifier used to look up and invoke the skill
+    description   — one-liner surfaced in skill listings and tool-choice prompts
+    category      — discovery | engineering | quality | documentation
     system_prompt — the expert-level system prompt for this skill
-    tools       — tool names (from tools.registry TOOL_DEFINITIONS) this skill may call
+    tools         — tool names (from tools.registry TOOL_DEFINITIONS) this skill may call
+    depends_on    — (5.1) other skill names that must run before this one in compose()
+    output_schema — (5.2) optional JSON Schema dict; if set, output is validated after invocation
     """
     name: str
     description: str
     category: str
     system_prompt: str
     tools: list[str] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+    output_schema: dict | None = None
 
 
 class SkillAgent:
@@ -34,12 +38,8 @@ class SkillAgent:
     Lightweight, single-use agent that executes one skill invocation.
     Uses BaseAgent's full machinery (prompt caching, tool loop) without
     a persistent identity — lives only for the duration of one skill call.
-
-    self._skill is assigned before BaseAgent.__init__() so that
-    _create_system_prompt() can read it when the parent constructor fires.
     """
 
-    # Deferred to avoid circular imports at module load
     _BaseAgent = None
 
     @classmethod
@@ -53,9 +53,6 @@ class SkillAgent:
         self._skill = skill
 
         Base = self._get_base()
-
-        # Build a throwaway BaseAgent subclass whose system prompt is the skill prompt.
-        # self._skill is captured via the enclosing scope — no class-level mutation needed.
         outer_skill = skill
 
         class _Agent(Base):  # type: ignore[valid-type]
@@ -72,7 +69,7 @@ class SkillAgent:
         """Run the skill on `task`. Returns the skill's text response."""
         from tools.registry import TOOL_DEFINITIONS
 
-        self._agent.messages = []  # fresh context per invocation
+        self._agent.messages = []
 
         if not self._skill.tools:
             return self._agent.think(task)
@@ -112,10 +109,34 @@ class SkillRegistry:
         task: str,
         workspace: Path | None = None,
     ) -> str:
-        """Invoke skill `name` on `task`. Returns the skill's text output."""
+        """Invoke skill `name` on `task`. Validates output schema if defined (5.2)."""
         skill = cls.get(name)
         agent = SkillAgent(skill, workspace=workspace)
-        return agent.invoke(task)
+        output = agent.invoke(task)
+
+        # 5.2: Optional output schema validation
+        if skill.output_schema:
+            try:
+                import json
+                parsed = json.loads(output)
+                # Simple presence check — full jsonschema validation requires the
+                # jsonschema package which is optional; fall through on ImportError.
+                try:
+                    import jsonschema
+                    jsonschema.validate(parsed, skill.output_schema)
+                except ImportError:
+                    pass  # jsonschema not installed; skip deep validation
+                except jsonschema.ValidationError as e:
+                    return json.dumps({
+                        "validation_failed": True,
+                        "skill": name,
+                        "error": str(e.message),
+                        "raw_output": output[:500],
+                    })
+            except (json.JSONDecodeError, TypeError):
+                pass  # output is not JSON — skip schema validation
+
+        return output
 
     @classmethod
     def list_skills(cls, category: str | None = None) -> list[Skill]:
@@ -144,20 +165,13 @@ class SkillRegistry:
         workspace: Path | None = None,
     ) -> dict[str, str]:
         """
-        Skill composition pipeline (#9).
+        Skill composition pipeline.
 
         Runs each skill in sequence. The output of skill N is appended as
         additional context when invoking skill N+1, so later skills benefit
         from prior reasoning without sharing conversation state.
 
         Returns an ordered dict of {skill_name: output} for every step.
-
-        Example:
-            results = SkillRegistry.chain(
-                ["decompose", "system_design", "adr"],
-                "Design a real-time notification service",
-            )
-            adr_text = results["adr"]
         """
         if not skill_names:
             raise ValueError("chain() requires at least one skill name")
@@ -168,10 +182,69 @@ class SkillRegistry:
         for name in skill_names:
             output = cls.invoke(name, context, workspace=workspace)
             results[name] = output
-            # Pipe this skill's output into the next skill's context
             context = (
                 f"Original task: {task}\n\n"
                 f"--- Output from '{name}' skill ---\n{output}"
             )
 
         return results
+
+    @classmethod
+    def _topological_sort(cls, skill_names: list[str]) -> list[str]:
+        """
+        Topological sort of skill_names respecting their depends_on declarations (5.1).
+        Raises ValueError on cycles.
+        """
+        # Build subgraph restricted to requested skills
+        graph: dict[str, list[str]] = {}
+        for name in skill_names:
+            try:
+                skill = cls.get(name)
+                deps = [d for d in skill.depends_on if d in skill_names]
+            except KeyError:
+                deps = []
+            graph[name] = deps
+
+        # Kahn's algorithm
+        in_degree: dict[str, int] = {n: 0 for n in graph}
+        for deps in graph.values():
+            for d in deps:
+                in_degree[d] = in_degree.get(d, 0) + 1
+
+        queue = [n for n in graph if in_degree[n] == 0]
+        order: list[str] = []
+        while queue:
+            node = queue.pop(0)
+            order.append(node)
+            for dependent, deps in graph.items():
+                if node in deps:
+                    in_degree[dependent] -= 1
+                    if in_degree[dependent] == 0:
+                        queue.append(dependent)
+
+        if len(order) != len(skill_names):
+            raise ValueError(f"Skill dependency cycle detected among: {skill_names}")
+        return order
+
+    @classmethod
+    def compose(
+        cls,
+        skill_names: list[str],
+        task: str,
+        workspace: Path | None = None,
+    ) -> dict[str, str]:
+        """
+        Skill composition with dependency graph resolution (5.1).
+
+        Like chain() but respects each skill's depends_on field — topologically
+        sorts the skill names before running the pipeline.
+
+        Example:
+            results = SkillRegistry.compose(
+                ["adr", "system_design", "decompose"],
+                "Design a payment service",
+            )
+            # Runs: decompose → system_design → adr (dependency order)
+        """
+        ordered = cls._topological_sort(skill_names)
+        return cls.chain(ordered, task, workspace=workspace)

@@ -7,8 +7,7 @@ from tools.registry import get_tools_for_role
 
 class TeamLead(BaseAgent):
     """
-    AI-powered Agile Team Lead / Scrum Master. Uses Claude to facilitate ceremonies,
-    surface impediments, synthesize team progress, and assess performance.
+    AI-powered Agile Team Lead / Scrum Master.
     """
 
     def _create_system_prompt(self) -> str:
@@ -107,7 +106,7 @@ be action-oriented. In performance assessment, be honest and specific.
             result = self.act(
                 "Read ARCHITECTURE.md and backlog_tasks.json from the workspace, "
                 "then return ONLY a valid JSON array of tasks with no surrounding text:\n"
-                '[{"title": "...", "description": "..."}, ...]',
+                '[{"title": "...", "description": "...", "depends_on": []}, ...]',
                 tools,
             )
             tasks = _extract_json_tasks(result)
@@ -129,11 +128,21 @@ be action-oriented. In performance assessment, be honest and specific.
         return []
 
     def assign_next_task(self, backlog, developer_name: str):
-        """Pure logic — no API call. Assigns the first pending task to a developer."""
-        pending = backlog.get_pending()
-        if not pending:
+        """
+        Dependency-aware assignment (2.2): only assigns tasks whose depends_on
+        tasks are all in a done/force_completed state.
+        """
+        done_titles = {
+            t.title for t in backlog._tasks
+            if t.status in ("done", "force_completed")
+        }
+        eligible = [
+            t for t in backlog.get_pending()
+            if all(dep in done_titles for dep in (t.depends_on or []))
+        ]
+        if not eligible:
             return None
-        return backlog.assign_task(pending[0].id, developer_name)
+        return backlog.assign_task(eligible[0].id, developer_name)
 
 
 def _extract_json_tasks(text: str) -> list[dict]:

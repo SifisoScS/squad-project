@@ -1,0 +1,7 @@
+{
+  "name": "task-manager-api",
+  "description": "Build a REST API for a task management application using Python and FastAPI.\n\nFeatures required:\n- CRUD operations for tasks: create, read, update, delete\n- Each task has: id, title, description, status (todo/in_progress/done), priority (low/medium/high)\n- JWT authentication: register, login, token-based access\n- SQLite database with SQLAlchemy ORM\n- Input validation with Pydantic models\n- Full pytest test suite with at least 80% coverage\n\nNon-functional requirements:\n- Clean project structure with separate modules for models, routes, auth, database\n- All endpoints return consistent JSON responses\n- Proper HTTP status codes (200, 201, 400, 401, 404, 422)\n- Requirements.txt with all dependencies pinned",
+  "tech_stack": ["Python", "FastAPI", "SQLite", "SQLAlchemy", "Pydantic", "python-jose", "pytest", "httpx"],
+  "build_timeout_seconds": 1800,
+  "human_checkpoints": []
+}

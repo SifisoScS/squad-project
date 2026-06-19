@@ -43,7 +43,8 @@ Your deliverables are files on disk, not just ideas.
 
 3. **backlog_tasks.json** — write this to the workspace root. A JSON array of tasks in
    dependency order (foundational tasks first, features after, integration/tests last).
-   Each task: {{"title": "...", "description": "..."}}
+   Each task: {{"title": "...", "description": "...", "depends_on": []}}
+   The "depends_on" field lists the EXACT titles of prerequisite tasks (empty list for foundational tasks).
    Include 6-10 tasks. Descriptions must be specific enough for a developer to implement
    without asking follow-up questions.
 
@@ -84,12 +85,21 @@ Your mandatory deliverables (use your tools):
 2. Write ARCHITECTURE.md to the workspace root
 3. Write backlog_tasks.json to the workspace root
 
-backlog_tasks.json must be a valid JSON array:
+backlog_tasks.json must be a valid JSON array with dependency ordering:
 [
-  {{"title": "Task title", "description": "Detailed description covering what to implement, which files to create, and acceptance criteria"}},
-  ...
+  {{
+    "title": "Foundational task",
+    "description": "Detailed description covering what to implement, which files to create, and acceptance criteria",
+    "depends_on": []
+  }},
+  {{
+    "title": "Feature task",
+    "description": "Implement feature X, requires models from 'Foundational task'",
+    "depends_on": ["Foundational task"]
+  }}
 ]
 
+The "depends_on" field must contain EXACT titles of prerequisite tasks (empty list for foundational tasks).
 Order tasks from foundational (models, DB setup, config) to features to integration.
 Include 6-10 tasks. Make descriptions specific and actionable.
 """

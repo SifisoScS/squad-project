@@ -6,8 +6,7 @@ from tools.registry import get_tools_for_role
 
 class SDET(BaseAgent):
     """
-    AI-powered Software Development Engineer in Test. Uses Claude to design test plans,
-    analyze test results, report defects, and collaborate with developers on testability.
+    AI-powered Software Development Engineer in Test.
     """
 
     def _create_system_prompt(self) -> str:
@@ -87,7 +86,7 @@ always include severity and reproduction steps. Never say "it should work" — o
 
     def test_task(self, task, workspace: Path) -> dict:
         """Write and run tests for a completed implementation task."""
-        self.messages = []  # fresh context per task
+        self.messages = []
         tools = get_tools_for_role("sdet")
         result_text = self.act(
             f"Write and run tests for this completed task.\n\n"
@@ -117,4 +116,20 @@ def _snake(title: str) -> str:
 def _parse_test_results(text: str) -> dict:
     passed = int(m.group(1)) if (m := re.search(r"(\d+)\s+passed", text)) else 0
     failed = int(m.group(1)) if (m := re.search(r"(\d+)\s+failed", text)) else 0
-    return {"passed": passed, "failed": failed, "output": text}
+
+    # 2.7: Detect skipped security/lint checks and flag them
+    security_check_skipped = (
+        "skipped" in text.lower() and
+        ("bandit" in text.lower() or "security" in text.lower())
+    )
+    lint_check_skipped = (
+        "skipped" in text.lower() and
+        ("ruff" in text.lower() or "lint" in text.lower())
+    )
+
+    result: dict = {"passed": passed, "failed": failed, "output": text}
+    if security_check_skipped:
+        result["security_check_skipped"] = True
+    if lint_check_skipped:
+        result["lint_check_skipped"] = True
+    return result

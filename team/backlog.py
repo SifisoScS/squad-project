@@ -1,7 +1,7 @@
 import json
 import os
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,9 +11,13 @@ class Task:
     id: str
     title: str
     description: str
-    status: str        # "todo" | "in_progress" | "done"
+    status: str        # "todo" | "in_progress" | "done" | "force_completed"
     assigned_to: str
     created_at: str    # ISO 8601
+    depends_on: list   # (2.2) list of task titles that must complete first
+
+
+_DONE_STATUSES = frozenset({"done", "force_completed"})
 
 
 class Backlog:
@@ -26,7 +30,12 @@ class Backlog:
         if self._path.exists():
             try:
                 data = json.loads(self._path.read_text(encoding="utf-8"))
-                self._tasks = [Task(**t) for t in data]
+                self._tasks = []
+                for t in data:
+                    # Handle older serialized tasks that lack depends_on
+                    if "depends_on" not in t:
+                        t["depends_on"] = []
+                    self._tasks.append(Task(**t))
             except (json.JSONDecodeError, TypeError):
                 self._tasks = []
 
@@ -35,7 +44,7 @@ class Backlog:
         tmp.write_text(json.dumps([asdict(t) for t in self._tasks], indent=2), encoding="utf-8")
         os.replace(tmp, self._path)
 
-    def add_task(self, title: str, description: str) -> Task:
+    def add_task(self, title: str, description: str, depends_on: list | None = None) -> Task:
         task = Task(
             id=str(uuid.uuid4())[:8],
             title=title,
@@ -43,6 +52,7 @@ class Backlog:
             status="todo",
             assigned_to="",
             created_at=datetime.now(timezone.utc).isoformat(),
+            depends_on=depends_on or [],
         )
         self._tasks.append(task)
         self._save()
@@ -61,6 +71,13 @@ class Backlog:
         self._save()
         return task
 
+    def force_complete_task(self, task_id: str) -> Task:
+        """Mark a task force_completed (shipped after max rejections). (1.4)"""
+        task = self._get(task_id)
+        task.status = "force_completed"
+        self._save()
+        return task
+
     def get_pending(self) -> list[Task]:
         return [t for t in self._tasks if t.status == "todo"]
 
@@ -68,16 +85,17 @@ class Backlog:
         return [t for t in self._tasks if t.status == "in_progress"]
 
     def all_done(self) -> bool:
-        return all(t.status == "done" for t in self._tasks)
+        return all(t.status in _DONE_STATUSES for t in self._tasks)
 
     def summary(self) -> str:
         todo = sum(1 for t in self._tasks if t.status == "todo")
         doing = sum(1 for t in self._tasks if t.status == "in_progress")
         done = sum(1 for t in self._tasks if t.status == "done")
-        lines = [f"Backlog ({todo} todo, {doing} in_progress, {done} done):"]
+        forced = sum(1 for t in self._tasks if t.status == "force_completed")
+        lines = [f"Backlog ({todo} todo, {doing} in_progress, {done} done, {forced} force_completed):"]
         for t in self._tasks:
             assignee = f" ({t.assigned_to})" if t.assigned_to else ""
-            lines.append(f"  [{t.status:<12}] #{t.id} — {t.title}{assignee}")
+            lines.append(f"  [{t.status:<16}] #{t.id} — {t.title}{assignee}")
         return "\n".join(lines)
 
     def update_task(self, task_id: str, **updates) -> Task:

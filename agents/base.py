@@ -1,4 +1,5 @@
 import os
+import time
 import warnings
 import httpx
 import anthropic
@@ -6,15 +7,24 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from dotenv import load_dotenv
 
+from config import cfg
+
 load_dotenv()
 
-MODEL = "claude-sonnet-4-6"
-MAX_ITERATIONS = 15
-MAX_RETRIES = 3          # retry attempts on 429 / 529
-RETRY_BASE_DELAY = 2.0   # seconds; doubles each attempt (2 → 4 → 8)
+MODEL = cfg.MODEL
+MAX_ITERATIONS = cfg.MAX_ITERATIONS
+MAX_RETRIES = cfg.MAX_RETRIES
+RETRY_BASE_DELAY = cfg.RETRY_BASE_DELAY
 
 
 def _make_client() -> anthropic.Anthropic:
+    # 1.7: Validate API key at startup — fail fast rather than mid-build.
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise EnvironmentError(
+            "ANTHROPIC_API_KEY is not set. Add it to your .env file before running."
+        )
+
     # SSL_CERT_FILE: path to a PEM bundle containing your corporate CA.
     # SSL_NO_VERIFY: set to "true" to disable SSL verification (corporate proxy workaround).
     ssl_cert_file = os.environ.get("SSL_CERT_FILE")
@@ -28,7 +38,7 @@ def _make_client() -> anthropic.Anthropic:
     else:
         http_client = None
 
-    kwargs = {"api_key": os.environ.get("ANTHROPIC_API_KEY")}
+    kwargs: dict = {"api_key": api_key}
     if http_client:
         kwargs["http_client"] = http_client
     return anthropic.Anthropic(**kwargs)
@@ -126,20 +136,37 @@ class BaseAgent(ABC):
         roles: list[str],
         workspace: Path | None = None,
         model: str | None = None,
+        max_history_turns: int | None = None,
     ):
         self.name = name
         self.roles = roles
         self.workspace = workspace
-        self.model = model or MODEL          # per-agent model override (#7)
+        self.model = model or MODEL
+        self.max_history_turns = max_history_turns or cfg.MAX_HISTORY_TURNS
         self.messages: list = []
-        self.memory_context: str = ""  # injected by Team.build_project() from DecisionLog
+        self.memory_context: str = ""
+        # 4.7: Token usage tracking
+        self._token_usage: dict[str, int] = {"input": 0, "output": 0}
         self._system_prompt_text = self._create_system_prompt()
 
     @abstractmethod
     def _create_system_prompt(self) -> str:
         """Return the system prompt text for this agent. Must be implemented by subclasses."""
 
-    # ── Retry helper (#2) ─────────────────────────────────────────────────────
+    # ── History pruning (2.1) ─────────────────────────────────────────────────
+
+    def _prune_history(self) -> None:
+        """
+        Keep message history bounded to prevent context window overflow.
+        Retains: first 2 messages (original task + first response) + last N pairs.
+        """
+        max_msgs = self.max_history_turns * 2
+        if len(self.messages) > max_msgs:
+            kept = self.messages[:2] + self.messages[-(max_msgs - 2):]
+            print(f"[{self.name}] History pruned: {len(self.messages)} → {len(kept)} messages")
+            self.messages = kept
+
+    # ── Retry helper ─────────────────────────────────────────────────────────
 
     def _retry_call(self, fn):
         """
@@ -147,7 +174,6 @@ class BaseAgent(ABC):
         API overload (529) responses, using exponential backoff.
         Any other APIStatusError is re-raised immediately.
         """
-        import time
         for attempt in range(MAX_RETRIES + 1):
             try:
                 return fn()
@@ -162,7 +188,6 @@ class BaseAgent(ABC):
                     time.sleep(delay)
                 else:
                     raise
-        # Unreachable — satisfies type checkers
         raise RuntimeError(f"{self.name}: retry loop exhausted")
 
     def _build_system(self) -> list[dict]:
@@ -174,7 +199,6 @@ class BaseAgent(ABC):
             }
         ]
         if self.memory_context:
-            # Not cached — changes per project run
             blocks.append({"type": "text", "text": self.memory_context})
         return blocks
 
@@ -191,6 +215,11 @@ class BaseAgent(ABC):
             messages=messages,
         ))
 
+        # 4.7: Accumulate token usage
+        if hasattr(response, "usage"):
+            self._token_usage["input"] += response.usage.input_tokens
+            self._token_usage["output"] += response.usage.output_tokens
+
         text = "".join(b.text for b in response.content if b.type == "text")
         self.messages.append({"role": "assistant", "content": text})
         return text
@@ -206,6 +235,7 @@ class BaseAgent(ABC):
         self.messages.append({"role": "user", "content": task})
 
         for _ in range(MAX_ITERATIONS):
+            self._prune_history()  # 2.1: keep history bounded
             system = self._build_system()
             messages = self.messages
             model = self.model
@@ -218,8 +248,11 @@ class BaseAgent(ABC):
                 tool_choice={"type": "auto"},
             ))
 
-            # Append the full content block list as the assistant turn.
-            # The SDK accepts its own typed objects directly here.
+            # 4.7: Accumulate token usage
+            if hasattr(response, "usage"):
+                self._token_usage["input"] += response.usage.input_tokens
+                self._token_usage["output"] += response.usage.output_tokens
+
             self.messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "end_turn":
@@ -238,31 +271,15 @@ class BaseAgent(ABC):
                 self.messages.append({"role": "user", "content": tool_results})
                 continue
 
-            break  # unexpected stop_reason
+            break
 
         return f"[WARNING: iteration limit reached after {MAX_ITERATIONS} steps]\n\n{_last_text(self.messages)}"
 
     def invoke_skill(self, skill_name: str, task: str) -> str:
-        """
-        Invoke a named skill from the SkillRegistry on `task`.
-        Skills are focused, reusable Claude capabilities (like Claude Code's slash commands).
-        The skill runs with this agent's current workspace but its own isolated context.
-        """
         from skills.registry import SkillRegistry
         return SkillRegistry.invoke(skill_name, task, workspace=self.workspace)
 
     def invoke_skill_chain(self, skill_names: list[str], task: str) -> dict[str, str]:
-        """
-        Run a pipeline of skills where each skill's output enriches the context
-        fed into the next skill (#9 — skill composition chains).
-
-        Returns an ordered dict of {skill_name: output} for every step so the
-        caller can inspect intermediate results or just use the final value.
-
-        Example:
-            results = self.invoke_skill_chain(["decompose", "system_design", "adr"], task)
-            final = results["adr"]
-        """
         from skills.registry import SkillRegistry
         return SkillRegistry.chain(skill_names, task, workspace=self.workspace)
 

@@ -1,0 +1,52 @@
+[
+  {
+    "id": 1,
+    "principle": "No hardcoded secrets, credentials, API keys, tokens, or passwords in source code",
+    "severity": "critical"
+  },
+  {
+    "id": 2,
+    "principle": "No SQL injection vectors — all database queries use parameterized statements or an ORM",
+    "severity": "critical"
+  },
+  {
+    "id": 3,
+    "principle": "No path traversal vulnerabilities — file paths are validated and sandboxed before use",
+    "severity": "critical"
+  },
+  {
+    "id": 4,
+    "principle": "All user input is validated and sanitized at system boundaries before processing or storage",
+    "severity": "high"
+  },
+  {
+    "id": 5,
+    "principle": "Authentication and authorization are correctly applied to every protected endpoint",
+    "severity": "critical"
+  },
+  {
+    "id": 6,
+    "principle": "No logging of sensitive data (passwords, tokens, PII) to stdout, files, or any log sink",
+    "severity": "high"
+  },
+  {
+    "id": 7,
+    "principle": "Cryptographic operations use standard vetted libraries — no homegrown or ad-hoc crypto",
+    "severity": "high"
+  },
+  {
+    "id": 8,
+    "principle": "Error messages do not leak sensitive system internals or stack traces to end users",
+    "severity": "medium"
+  },
+  {
+    "id": 9,
+    "principle": "No features that enable unauthorized data collection, surveillance, or privacy violation",
+    "severity": "critical"
+  },
+  {
+    "id": 10,
+    "principle": "All dependencies are explicitly listed; no packages with known critical CVEs",
+    "severity": "high"
+  }
+]

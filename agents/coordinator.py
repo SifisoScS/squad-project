@@ -34,11 +34,11 @@ When reviewing an implemented task:
 4. Evaluate against: architecture alignment, security, code quality, completeness
 5. Give a clear, specific verdict
 
-Your verdict MUST contain exactly one of these words:
-- APPROVED — the work meets the bar and can move forward
-- REJECTED — there are specific problems that must be fixed before moving on
+Your verdict MUST begin with exactly one of these structured lines as the very first line of your response:
+  VERDICT: APPROVED
+  VERDICT: REJECTED
 
-When rejecting: name the file, the exact issue, and what the correct fix is.
+After the verdict line, provide your reasoning. When rejecting: name the file, the exact issue, and what the correct fix is.
 Vague feedback wastes everyone's time. Be surgical.
 
 ## Quality Bar
@@ -119,10 +119,13 @@ When rejecting, bullet each issue with file + line context where possible.
             f"2. Call list_files('.') to see what exists in the workspace\n"
             f"3. Read the implementation files most relevant to this task\n"
             f"4. Evaluate: architecture alignment, security, code quality, completeness\n"
-            f"5. Respond with APPROVED or REJECTED, followed by your specific reasoning.",
+            f"5. Start your response with 'VERDICT: APPROVED' or 'VERDICT: REJECTED' on the first line, "
+            f"followed by your specific reasoning.",
             tools,
         )
-        approved = "APPROVED" in result.upper() and "REJECTED" not in result.upper()
+        # 1.6: Parse only the first line to avoid false positives from quoted text
+        first_line = result.strip().splitlines()[0].upper() if result.strip() else ""
+        approved = first_line.startswith("VERDICT: APPROVED")
         return {"approved": approved, "feedback": result, "skill_audit": skill_audit}
 
     def needs_specialist(self, task) -> tuple[bool, str]:

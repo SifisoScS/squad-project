@@ -1,5 +1,18 @@
 import os
+import threading
 from pathlib import Path
+
+# Per-file write locks (1.2): prevents concurrent developers from silently
+# overwriting each other's work when building in parallel.
+_file_locks: dict[str, threading.Lock] = {}
+_locks_registry_lock = threading.Lock()
+
+
+def _get_file_lock(resolved_path: str) -> threading.Lock:
+    with _locks_registry_lock:
+        if resolved_path not in _file_locks:
+            _file_locks[resolved_path] = threading.Lock()
+        return _file_locks[resolved_path]
 
 
 def _safe_path(path: str, workspace_root: Path) -> Path:
@@ -13,8 +26,10 @@ def _safe_path(path: str, workspace_root: Path) -> Path:
 def write_file(path: str, content: str, workspace_root: Path) -> dict:
     try:
         target = _safe_path(path, workspace_root)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        file_lock = _get_file_lock(str(target))
+        with file_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
         return {"success": True, "path": str(target.relative_to(workspace_root)), "bytes_written": len(content.encode())}
     except ValueError as e:
         return {"error": str(e)}

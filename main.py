@@ -3,6 +3,7 @@ import argparse
 from team import Team
 from team.project import ProjectSpec
 
+# 3.8: Accept project spec from CLI args or a JSON file
 parser = argparse.ArgumentParser(description="Autonomous software factory powered by Claude AI")
 parser.add_argument(
     "--mode",
@@ -11,13 +12,49 @@ parser.add_argument(
     help="build: autonomous project builder | simulate: sprint simulation (default: build)",
 )
 parser.add_argument("--sprints", type=int, default=3, help="Sprints for simulate mode (default: 3)")
+
+# 3.8: Spec input modes
+spec_group = parser.add_argument_group("Project spec (for build mode)")
+spec_group.add_argument("--spec", help="Path to a project spec JSON file (see spec.example.json)")
+spec_group.add_argument("--name", help="Project name (e.g. task-manager-api)")
+spec_group.add_argument("--description", help="Project description")
+spec_group.add_argument("--stack", nargs="+", help="Tech stack items (e.g. Python FastAPI SQLite)")
+spec_group.add_argument("--timeout", type=int, default=1800, help="Build timeout in seconds (default: 1800)")
+
 args = parser.parse_args()
 
 
-if args.mode == "build":
-    # ── AUTONOMOUS BUILD MODE ─────────────────────────────────────────────────
-    # Change this ProjectSpec to build any project you want.
-    spec = ProjectSpec(
+def _load_spec_from_args() -> ProjectSpec:
+    """Load ProjectSpec from --spec file, --name/--description/--stack flags, or built-in example."""
+    if args.spec:
+        path = __import__("pathlib").Path(args.spec)
+        if not path.exists():
+            parser.error(f"Spec file not found: {args.spec}")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            parser.error(f"Failed to read spec file: {e}")
+        return ProjectSpec(
+            name=data["name"],
+            description=data["description"],
+            tech_stack=data["tech_stack"],
+            build_timeout_seconds=data.get("build_timeout_seconds", args.timeout),
+            human_checkpoints=data.get("human_checkpoints", []),
+        )
+
+    if args.name or args.description or args.stack:
+        missing = [f for f, v in [("--name", args.name), ("--description", args.description), ("--stack", args.stack)] if not v]
+        if missing:
+            parser.error(f"When using CLI flags, all three are required: {', '.join(missing)}")
+        return ProjectSpec(
+            name=args.name,
+            description=args.description,
+            tech_stack=args.stack,
+            build_timeout_seconds=args.timeout,
+        )
+
+    # Default built-in example
+    return ProjectSpec(
         name="task-manager-api",
         description="""
         Build a REST API for a task management application using Python and FastAPI.
@@ -37,8 +74,12 @@ if args.mode == "build":
         - Requirements.txt with all dependencies pinned
         """,
         tech_stack=["Python", "FastAPI", "SQLite", "SQLAlchemy", "Pydantic", "python-jose", "pytest", "httpx"],
+        build_timeout_seconds=args.timeout,
     )
 
+
+if args.mode == "build":
+    spec = _load_spec_from_args()
     team = Team.default()
     report = team.build_project(spec)
 
@@ -48,8 +89,7 @@ if args.mode == "build":
     print(json.dumps(report, indent=2))
 
 else:
-    # ── SPRINT SIMULATION MODE ─────────────────────────────────────────────────
-    # Silicon Valley product squad: PM-led, OKR-driven, outcome-focused.
+    # ── SPRINT SIMULATION MODE ────────────────────────────────────────────────
     from agents import Developer, SDET, TeamLead, ProductManager
 
     pm_roles = [
