@@ -27,6 +27,12 @@ import builtins
 import shutil
 import sys
 import uuid
+
+# Ensure stdout/stderr use UTF-8 on Windows (cp1252 can't encode arrows etc.)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
@@ -332,7 +338,12 @@ async def delete_workspace(
     ws_path = Path(cfg.WORKSPACE_ROOT) / name
     if not ws_path.exists():
         raise HTTPException(404, detail=f"Workspace '{name}' not found")
-    shutil.rmtree(ws_path)
+    try:
+        shutil.rmtree(ws_path)
+    except PermissionError as e:
+        raise HTTPException(409, detail=f"Cannot delete workspace '{name}': {e}. Close any open files or disable sync.")
+    except OSError as e:
+        raise HTTPException(500, detail=f"Failed to delete workspace '{name}': {e}")
     return {"deleted": name}
 
 
@@ -413,7 +424,16 @@ def _sync_build(build_id: str, spec: ProjectSpec, on_line, loop, on_checkpoint) 
     _orig_print = builtins.print
 
     def _patched(*args, sep=" ", end="\n", file=None, flush=False):
-        _orig_print(*args, sep=sep, end=end, file=file, flush=flush)
+        try:
+            _orig_print(*args, sep=sep, end=end, file=file, flush=flush)
+        except UnicodeEncodeError:
+            # Windows console can't encode some Unicode — replace unrepresentable chars
+            text = sep.join(str(a) for a in args)
+            safe = text.encode(getattr(sys.stdout, "encoding", "utf-8") or "utf-8", errors="replace").decode("utf-8", errors="replace")
+            try:
+                _orig_print(safe, end=end, file=file, flush=flush)
+            except Exception:
+                pass
         if file is None or file is sys.stdout:
             on_line(sep.join(str(a) for a in args))
 
